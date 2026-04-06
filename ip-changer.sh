@@ -81,6 +81,43 @@ get_ip() {
     echo "$ip"
 }
 
+# Delete Tor log files every 5s under typical Homebrew / Linux paths (not Tor data/state). Stops when the script exits.
+_ipc_tor_log_purge_once() {
+    local d
+    if [ "$(uname)" = "Darwin" ]; then
+        for d in /opt/homebrew/var/log/tor /usr/local/var/log/tor "${HOME}/Library/Logs/Tor"; do
+            if [ -d "$d" ]; then
+                find "$d" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -exec rm -f {} + 2>/dev/null || true
+            fi
+        done
+    else
+        for d in /var/log/tor; do
+            if [ -d "$d" ] && [ -w "$d" ]; then
+                find "$d" -mindepth 1 -maxdepth 1 -type f -exec rm -f {} + 2>/dev/null || true
+            fi
+        done
+    fi
+}
+
+_ipc_start_tor_log_purge_loop() {
+    (
+        while true; do
+            sleep 5
+            _ipc_tor_log_purge_once
+        done
+    ) &
+    _IPC_LOG_PURGE_PID=$!
+}
+
+_ipc_stop_tor_log_purge_loop() {
+    if [ -n "${_IPC_LOG_PURGE_PID:-}" ]; then
+        kill "$_IPC_LOG_PURGE_PID" 2>/dev/null || true
+        _IPC_LOG_PURGE_PID=
+    fi
+}
+
+trap '_ipc_stop_tor_log_purge_loop' EXIT INT TERM
+
 OS_TYPE=$(uname)
 if [ "$OS_TYPE" = "Darwin" ]; then
     # macOS
@@ -89,6 +126,7 @@ if [ "$OS_TYPE" = "Darwin" ]; then
         install_packages_macos
     fi
     start_tor_macos
+    _ipc_start_tor_log_purge_loop
 else
     # Linux
     if ! command -v curl &> /dev/null || ! command -v tor &> /dev/null; then
@@ -96,6 +134,7 @@ else
         install_packages_linux
     fi
     start_tor_linux
+    _ipc_start_tor_log_purge_loop
 fi
 
 clear

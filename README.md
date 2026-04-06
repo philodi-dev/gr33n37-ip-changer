@@ -1,103 +1,160 @@
 # gr33n37-ip-changer
 
-Bash script that uses Tor to change your IP at specified intervals.
+Rotate your public IP using **Tor**: a cross‑platform **Bash** script and a **macOS System Settings** preference pane (**IP Changer**) that show exit IP, location-style info, and (on macOS) your Tor circuit when the control port is enabled.
 
 ![gp](https://github.com/gr33n37/gr33n37-ip-changer/assets/30112537/34e1c4e2-ec79-4ef3-b0a2-e99eee48bb4b)
 
+## Repository contents
+
+| Component | Platform | Description |
+|-----------|----------|-------------|
+| [`ip-changer.sh`](ip-changer.sh) | Linux & macOS | Interactive script: start Tor, restart/reload for new exits, optional intervals and repeat counts. |
+| [`ipchanger/`](ipchanger/) | macOS only | Xcode project builds `ipchanger.prefPane` — **IP Changer** in System Settings: rotation controls, live exit identity, flags, ISP/region/city/country, Tor path (guard → middle → exit). |
+| **`IPChangerMenuBar`** (same Xcode project) | macOS only | Optional **menu bar extra** (`NSStatusItem`): short **country code · city** (or IP) via Tor SOCKS; no Dock icon (`LSUIElement`). The **preference pane cannot** add a persistent bar item by itself. |
+
+---
+
 ## Installation
 
-You can either `git clone` the repository or `curl` the Bash script.
-
-Using `git clone`:
+### Clone the repository
 
 ```shell
-git clone https://github.com/gr33n37/gr33n37-ip-changer.git
+git clone https://github.com/philodi-dev/gr33n37-ip-changer.git
 cd gr33n37-ip-changer
 ```
 
-Using `curl`:
+### Or download only the script
 
 ```shell
-curl -O 'https://raw.githubusercontent.com/gr33n37/gr33n37-ip-changer/main/ip-changer.sh'
+curl -O 'https://raw.githubusercontent.com/philodi-dev/gr33n37-ip-changer/main/ip-changer.sh'
 chmod +x ip-changer.sh
 ```
 
-## Usage
+---
 
-### On Linux
-Run the script with root privileges:
+## Usage: `ip-changer.sh`
+
+### Linux
+
+Run with root privileges (package install / `systemctl`):
 
 ```shell
 sudo ./ip-changer.sh
 ```
 
-### On macOS
-Run the script (no sudo required):
+### macOS
+
+No `sudo` required; uses Homebrew and `brew services`:
 
 ```shell
 ./ip-changer.sh
 ```
 
-#### Requirements for macOS
-- [Homebrew](https://brew.sh/) must be installed.
-- The script will check for and install Tor and curl via Homebrew if needed.
-- Tor is managed using `brew services`.
+### Script behaviour
 
-#### Requirements for Linux
-- The script will attempt to install Tor and curl using your system's package manager (apt, yum, pacman, etc.).
-- Tor is managed using `systemctl`.
+- **Interval** and **repeat count** are read interactively.
+- If **either** interval **or** count is **0**, the script runs **indefinite** IP changes (with a random 10–20s delay on macOS in that mode).
+- On macOS the script uses **`brew services restart tor`** each change (see the pref pane below for **NEWNYM** without full restarts).
 
-First, enter how long you want to stay on one server before changing the IP.
-Then, enter how many times to change the IP. Enter 0 for unlimited changes.
+### Requirements
+
+- **macOS:** [Homebrew](https://brew.sh/); Tor and `curl` are installed if missing.
+- **Linux:** `curl` and `tor`; the script tries `apt`, `yum`, or `pacman` as appropriate.
 
 ---
 
-## Important Notes & Troubleshooting
+## macOS preference pane (IP Changer)
 
-### 1. Your Browser or Apps Must Use the Tor Proxy
+### Build and install
 
-This script changes your IP for traffic routed through the Tor SOCKS proxy (`127.0.0.1:9050`).
-Most browsers and apps do **not** use this proxy by default. To hide your real IP, you must configure your browser or system to use the Tor proxy:
+From the **`ipchanger`** directory (the one that contains `ipchanger.xcodeproj`):
 
-**Firefox:**
-- Preferences → General → Network Settings → Settings...
-- Select "Manual proxy configuration"
-- Set SOCKS Host: `127.0.0.1` Port: `9050`
-- Choose SOCKS v5
-- Check "Proxy DNS when using SOCKS v5"
+```shell
+cd ipchanger
+chmod +x ipchanger/install_prefpane.sh
+./ipchanger/install_prefpane.sh
+```
 
-**Chrome/Chromium:**
-- Start Chrome with:
-  ```
-  /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --proxy-server="socks5://127.0.0.1:9050"
-  ```
+- Do **not** run the installer as **root**; signing uses your login keychain. The pane is installed to **`~/Library/PreferencePanes/`**, and **`install_prefpane.sh`** also builds and copies **`IPChangerMenuBar.app`** to **`~/Applications/`** (menu bar helper).
+- Or open **`ipchanger.xcodeproj`** in Xcode, select the **ipchanger** scheme, **Product → Build** (⌘B). If your scheme has a post-build copy action, it may install the signed pane automatically.
+- After installing, **quit System Settings fully** (⌘Q), reopen, and search for **IP Changer** or **ipchanger**.
 
-**System-wide (macOS):**
-- System Preferences → Network → Advanced → Proxies
-- Set SOCKS Proxy to `127.0.0.1:9050`
+### What the pane shows
 
-### 2. Disable iCloud Private Relay and VPNs
+- **Rotation:** interval (seconds; `0` = no extra wait between steps), number of changes (`0` = unlimited), **Start** / **Stop** (Stop ends the rotation loop only; it does not stop the Tor service).
+- **Exit identity:** exit **IPv4**, **country**, **region**, **city**, **ISP** (from ip-api over SOCKS), **flag** (flag image loaded over Tor from [flagcdn.com](https://flagcdn.com)), and **Tor circuit** names when available.
+- **Connection status:** internet path, Tor process, SOCKS **9050**, rotation state.
 
-If you see "Apple iCloud Private Relay" or a VPN in your IP info, your traffic is not using Tor.
+### Tor control port (recommended on macOS)
 
-- **Disable iCloud Private Relay:**
-  - System Settings → [Your Name] → iCloud → Private Relay → Turn Off
-- **Disable any other VPNs** while using this script.
+IP rotation prefers **`SIGNAL NEWNYM`** on **`127.0.0.1:9051`** so Tor keeps running. Circuit names and NEWNYM need a control port. Add to your **`torrc`** (typical Homebrew paths: `/opt/homebrew/etc/tor/torrc` or `/usr/local/etc/tor/torrc`), then restart Tor once:
 
-### 3. IPv6 Leaks
+```text
+ControlPort 9051
+CookieAuthentication 1
+```
 
-Tor by default only handles IPv4. If your browser uses IPv6, your real IP may leak.
-- Disable IPv6 in your network settings, or use browser add-ons to force IPv4.
-- Or, configure your browser to use only IPv4 when using the Tor proxy.
+Without **9051**, the pane falls back to **`brew services restart tor`** for each rotation, and the **Tor circuit** line may stay **—**.
 
-### 4. Test Tor Proxy Directly
+### Menu bar helper (`IPChangerMenuBar.app`)
 
-To verify Tor is working, run:
-```bash
+System Settings plug-ins do not run in the background, so a **separate tiny app** adds the status item (like other menu bar tools).
+
+1. Open **`ipchanger/ipchanger.xcodeproj`** in Xcode.
+2. Select the **`IPChangerMenuBar`** scheme.
+3. **Product → Run** (⌘R). The icon appears in the menu bar; **Quit** from its menu stops it.
+4. To **keep it across logins:** add the built app to **System Settings → General → Login Items & Extensions → Open at Login** (or drag `IPChangerMenuBar.app` from the **Products** folder in Xcode’s Report navigator after a build).
+
+The bar updates about every **30 seconds** (and when you choose **Refresh now**). It uses **`127.0.0.1:9050`** like the rest of this project — start Tor first.
+
+---
+
+## Important: your apps must use Tor
+
+Traffic is anonymised only when it goes through the Tor SOCKS proxy **`127.0.0.1:9050`**. Most apps do not use it by default.
+
+**Firefox**
+
+- Settings → General → Network Settings → **Manual proxy configuration**
+- **SOCKS Host:** `127.0.0.1` **Port:** `9050`, **SOCKS v5**, enable **Proxy DNS when using SOCKS v5**
+
+**Chrome / Chromium**
+
+```shell
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --proxy-server="socks5://127.0.0.1:9050"
+```
+
+**macOS system proxy**
+
+- System Settings → Network → your interface → Details → Proxies → **SOCKS proxy** `127.0.0.1` **9050**
+
+### iCloud Private Relay & VPNs
+
+If an IP lookup still shows **iCloud Private Relay** or your VPN, that traffic is **not** the Tor exit. Turn off **Private Relay** (Apple ID → iCloud → Private Relay) and disconnect other VPNs while testing Tor.
+
+### IPv6 leaks
+
+Tor often exits over **IPv4** only. If the browser uses **IPv6**, your real address can leak. Restrict IPv6 for the interface you use with Tor, or force IPv4 in the browser where possible.
+
+### Verify Tor SOCKS
+
+```shell
 curl -s --socks5-hostname 127.0.0.1:9050 https://checkip.amazonaws.com
 ```
-This should show a Tor exit node IP, not your real IP.
+
+You should see a Tor exit IP, not your home or relay IP.
 
 ---
 
-If you follow these steps, your public IP (as seen by websites) should match a Tor exit node, not your real IP or iCloud Private Relay IP.
+## Security notes
+
+- Do not commit **certificates**, **`.p12`**, **`.mobileprovision`**, **AuthKey `*.p8`**, or **`.env`** secrets; this repo’s **`.gitignore`** tries to exclude common Apple signing and key patterns.
+- The pref pane runs **`brew`** and **`curl`** to manage Tor and query exit info; use only builds you trust.
+
+---
+
+## License / attribution
+
+Project structure and behaviour may evolve; see git history for authors. Third-party services (**ip-api**, **flagcdn**) have their own terms and rate limits; use is subject to those services’ policies.
+
+If you follow the proxy and Tor steps above, the address sites see should match a **Tor exit**, not your normal ISP or relay IP.
