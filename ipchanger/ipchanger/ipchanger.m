@@ -266,6 +266,29 @@ static NSFileHandle *IPCNullOutput(void)
 static void IPCRunOnBackground(dispatch_block_t block);
 static void IPCRunOnMain(dispatch_block_t block);
 
+/// Same path the menu bar app reads — Tor exit IP/geo as shown in the pref pane (SOCKS lookup).
+static NSString *IPCSharedExitIdentityPath(void)
+{
+    NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/IPChanger"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    return [dir stringByAppendingPathComponent:@"exit-identity.plist"];
+}
+
+static void IPCWriteSharedExitIdentity(NSDictionary *snap)
+{
+    NSDictionary *s = snap ?: @{};
+    NSMutableDictionary *plist = [NSMutableDictionary dictionary];
+    plist[@"ok"] = @([s[@"ok"] boolValue]);
+    for (NSString *k in @[ @"query", @"countryCode", @"country", @"region", @"city", @"isp" ]) {
+        id v = s[k];
+        plist[k] = ([v isKindOfClass:[NSString class]] && [(NSString *)v length]) ? v : @"";
+    }
+    plist[@"updated"] = [NSDate date];
+    NSString *path = IPCSharedExitIdentityPath();
+    (void)[plist writeToURL:[NSURL fileURLWithPath:path isDirectory:NO] atomically:YES];
+    [[NSDistributedNotificationCenter defaultCenter] postNotificationName:@"com.philodi.ipchanger.ExitIdentityChanged" object:nil userInfo:nil deliverImmediately:YES];
+}
+
 @implementation ipchanger
 
 #pragma mark - Lifecycle
@@ -1126,38 +1149,41 @@ static void IPCRunOnMain(dispatch_block_t block);
 
 - (void)ipc_applyExitIdentitySnapshot:(NSDictionary *)snap
 {
-    if ([snap[@"ok"] boolValue]) {
-        NSString *q = snap[@"query"];
+    NSDictionary *s = snap ?: @{};
+
+    if ([s[@"ok"] boolValue]) {
+        NSString *q = s[@"query"];
         self.ipValueField.stringValue = ([q isKindOfClass:[NSString class]] && q.length) ? q : @"—";
-        NSString *country = snap[@"country"];
+        NSString *country = s[@"country"];
         self.countryNameField.stringValue = ([country isKindOfClass:[NSString class]] && country.length) ? country : @"—";
-        NSString *region = snap[@"region"];
+        NSString *region = s[@"region"];
         self.regionNameField.stringValue = ([region isKindOfClass:[NSString class]] && region.length) ? region : @"—";
-        NSString *city = snap[@"city"];
+        NSString *city = s[@"city"];
         self.cityNameField.stringValue = ([city isKindOfClass:[NSString class]] && city.length) ? city : @"—";
-        NSString *isp = snap[@"isp"];
+        NSString *isp = s[@"isp"];
         self.ispNameField.stringValue = ([isp isKindOfClass:[NSString class]] && isp.length) ? isp : @"—";
-        NSString *cc = [snap[@"countryCode"] isKindOfClass:[NSString class]] ? snap[@"countryCode"] : @"";
-        NSData *png = [snap[@"flagPNG"] isKindOfClass:[NSData class]] ? snap[@"flagPNG"] : nil;
+        NSString *cc = [s[@"countryCode"] isKindOfClass:[NSString class]] ? s[@"countryCode"] : @"";
+        NSData *png = [s[@"flagPNG"] isKindOfClass:[NSData class]] ? s[@"flagPNG"] : nil;
         [self ipc_setFlagImageFromPNGData:png countryCode:cc];
-        return;
+    } else {
+        NSString *ip = [s[@"query"] isKindOfClass:[NSString class]] ? s[@"query"] : nil;
+        if (ip.length) {
+            self.ipValueField.stringValue = ip;
+            self.countryNameField.stringValue = @"(Geo lookup failed — is Tor SOCKS up?)";
+            self.regionNameField.stringValue = @"—";
+            self.cityNameField.stringValue = @"—";
+            self.ispNameField.stringValue = @"—";
+        } else {
+            self.ipValueField.stringValue = @"—";
+            self.countryNameField.stringValue = @"—";
+            self.regionNameField.stringValue = @"—";
+            self.cityNameField.stringValue = @"—";
+            self.ispNameField.stringValue = @"—";
+        }
+        [self ipc_setFlagEmoji:@"🌐"];
     }
 
-    NSString *ip = [snap[@"query"] isKindOfClass:[NSString class]] ? snap[@"query"] : nil;
-    if (ip.length) {
-        self.ipValueField.stringValue = ip;
-        self.countryNameField.stringValue = @"(Geo lookup failed — is Tor SOCKS up?)";
-        self.regionNameField.stringValue = @"—";
-        self.cityNameField.stringValue = @"—";
-        self.ispNameField.stringValue = @"—";
-    } else {
-        self.ipValueField.stringValue = @"—";
-        self.countryNameField.stringValue = @"—";
-        self.regionNameField.stringValue = @"—";
-        self.cityNameField.stringValue = @"—";
-        self.ispNameField.stringValue = @"—";
-    }
-    [self ipc_setFlagEmoji:@"🌐"];
+    IPCWriteSharedExitIdentity(s);
 }
 
 - (void)refreshExitIdentity

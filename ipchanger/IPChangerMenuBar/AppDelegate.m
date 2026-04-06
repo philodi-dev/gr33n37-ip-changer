@@ -1,30 +1,14 @@
 //
-//  AppDelegate.m — menu bar: public IP + country flag; opens IP Changer pref pane in System Settings.
+//  AppDelegate.m — menu bar: flag only (Tor exit country from pref pane); IP in menu when opened.
 //
 
 #import "AppDelegate.h"
 #import <AppKit/AppKit.h>
 
-static NSString *IPCMBCurlDirect(NSString *url)
+static NSString *IPCMBSharedExitIdentityPath(void)
 {
-    NSArray *args = @[
-        @"-s", @"--connect-timeout", @"6", @"-m", @"10",
-        url,
-    ];
-    NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/curl"];
-    task.arguments = args;
-    task.standardError = [NSFileHandle fileHandleForWritingAtPath:@"/dev/null"];
-    NSPipe *out = [NSPipe pipe];
-    task.standardOutput = out;
-    @try {
-        [task launch];
-    } @catch (__unused NSException *ex) {
-        return nil;
-    }
-    [task waitUntilExit];
-    NSData *data = [[out fileHandleForReading] readDataToEndOfFile];
-    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/IPChanger"];
+    return [dir stringByAppendingPathComponent:@"exit-identity.plist"];
 }
 
 /// ISO 3166-1 alpha-2 → regional-indicator flag emoji (empty if invalid).
@@ -39,9 +23,49 @@ static NSString *IPCMBFlagEmojiFromCountryCode(NSString *cc)
     return [NSString stringWithCharacters:(unichar[]){ r0, r1 } length:2];
 }
 
-@interface AppDelegate ()
+/// NSStatusItem titles often render regional-indicator flags as blank; rasterize like the pref pane does.
+static NSImage *IPCMBRasterizeFlagEmoji(NSString *emoji)
+{
+    NSString *s = emoji.length ? emoji : @"🌐";
+    CGFloat fontSize = 17.0;
+    NSFont *font = [NSFont fontWithName:@"Apple Color Emoji" size:fontSize];
+    if (!font) {
+        font = [NSFont systemFontOfSize:fontSize];
+    }
+    NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
+    para.alignment = NSTextAlignmentCenter;
+    NSDictionary *attrs = @{
+        NSFontAttributeName: font,
+        NSParagraphStyleAttributeName: para,
+    };
+    NSStringDrawingOptions drawOpts = NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesDeviceMetrics;
+    NSSize maxHint = NSMakeSize(120.0, 90.0);
+    NSRect br = [s boundingRectWithSize:maxHint options:drawOpts attributes:attrs];
+    CGFloat tw = MAX(18.0, ceil(NSWidth(br)));
+    CGFloat th = MAX(16.0, ceil(NSHeight(br)));
+    NSSize sz = NSMakeSize(tw + 10.0, th + 8.0);
+
+    NSImage *image = [NSImage imageWithSize:sz flipped:NO drawingHandler:^BOOL(NSRect rect) {
+        [[NSGraphicsContext currentContext] setImageInterpolation:NSImageInterpolationHigh];
+        [[NSColor clearColor] setFill];
+        NSRectFill(rect);
+        CGFloat x = floor((NSWidth(rect) - tw) * 0.5);
+        CGFloat y = floor((NSHeight(rect) - th) * 0.5);
+        NSRect drawR = NSMakeRect(x, y, tw, th);
+        [s drawWithRect:drawR options:drawOpts attributes:attrs context:nil];
+        return YES;
+    }];
+    image.template = NO;
+    // Status bar layout expects a modest logical size.
+    [image setSize:NSMakeSize(22.0, 18.0)];
+    return image;
+}
+
+@interface AppDelegate () <NSMenuDelegate>
 @property (nonatomic, strong) NSStatusItem *statusItem;
-@property (nonatomic, strong) NSTimer *refreshTimer;
+@property (nonatomic, strong) NSTimer *pollTimer;
+@property (nonatomic, strong) NSMenuItem *ipMenuItem;
+@property (nonatomic, strong) NSMenuItem *detailMenuItem;
 @end
 
 @implementation AppDelegate
@@ -50,14 +74,26 @@ static NSString *IPCMBFlagEmojiFromCountryCode(NSString *cc)
 {
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     NSButton *btn = self.statusItem.button;
-    btn.image = nil;
-    btn.imagePosition = NSNoImage;
-    btn.title = @"…";
+    btn.image = IPCMBRasterizeFlagEmoji(@"🌐");
+    btn.imagePosition = NSImageOnly;
+    btn.title = @"";
 
     NSMenu *menu = [[NSMenu alloc] init];
-    NSMenuItem *m;
+    menu.delegate = self;
 
-    m = [menu addItemWithTitle:@"Refresh now" action:@selector(refreshNow) keyEquivalent:@"r"];
+    self.ipMenuItem = [[NSMenuItem alloc] initWithTitle:@"IP: —" action:NULL keyEquivalent:@""];
+    self.ipMenuItem.enabled = NO;
+
+    self.detailMenuItem = [[NSMenuItem alloc] initWithTitle:@"" action:NULL keyEquivalent:@""];
+    self.detailMenuItem.enabled = NO;
+    self.detailMenuItem.hidden = YES;
+
+    [menu addItem:self.ipMenuItem];
+    [menu addItem:self.detailMenuItem];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *m;
+    m = [menu addItemWithTitle:@"Reload from IP Changer" action:@selector(reloadFromSharedState) keyEquivalent:@"r"];
     m.target = self;
 
     m = [menu addItemWithTitle:@"Open IP Changer Settings…" action:@selector(openSystemSettingsForIPChanger) keyEquivalent:@"s"];
@@ -70,68 +106,92 @@ static NSString *IPCMBFlagEmojiFromCountryCode(NSString *cc)
 
     self.statusItem.menu = menu;
 
-    [self refreshNow];
+    [[NSDistributedNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadFromSharedState) name:@"com.philodi.ipchanger.ExitIdentityChanged" object:nil suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+
+    [self reloadFromSharedState];
     __weak typeof(self) wself = self;
-    self.refreshTimer = [NSTimer timerWithTimeInterval:30.0 repeats:YES block:^(NSTimer *timer) {
-        [wself refreshNow];
+    self.pollTimer = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
+        [wself reloadFromSharedState];
     }];
-    [[NSRunLoop mainRunLoop] addTimer:self.refreshTimer forMode:NSRunLoopCommonModes];
+    [[NSRunLoop mainRunLoop] addTimer:self.pollTimer forMode:NSRunLoopCommonModes];
 }
 
-- (void)refreshNow
+- (void)dealloc
 {
-    __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        __strong typeof(weakSelf) self = weakSelf;
-        if (!self) return;
+    [[NSDistributedNotificationCenter defaultCenter] removeObserver:self name:@"com.philodi.ipchanger.ExitIdentityChanged" object:nil];
+}
 
-        // Direct connection (not Tor SOCKS) so the menu bar shows your public IP + geo when online.
-        NSString *json = IPCMBCurlDirect(@"http://ip-api.com/json/?fields=status,message,query,country,countryCode,city");
-        NSString *title = @"—";
-        NSString *tip = @"Could not reach ip-api.com. Check your network.";
+- (void)menuWillOpen:(NSMenu *)menu
+{
+    [self reloadFromSharedState];
+}
 
-        if (json.length) {
-            NSData *d = [json dataUsingEncoding:NSUTF8StringEncoding];
-            NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
-            if ([dict isKindOfClass:[NSDictionary class]] && [dict[@"status"] isEqualToString:@"success"]) {
-                NSString *city = [dict[@"city"] isKindOfClass:[NSString class]] ? dict[@"city"] : @"";
-                NSString *country = [dict[@"country"] isKindOfClass:[NSString class]] ? dict[@"country"] : @"";
-                NSString *cc = [dict[@"countryCode"] isKindOfClass:[NSString class]] ? dict[@"countryCode"] : @"";
-                NSString *query = [dict[@"query"] isKindOfClass:[NSString class]] ? dict[@"query"] : @"";
-                NSString *flag = IPCMBFlagEmojiFromCountryCode(cc);
-                if (query.length) {
-                    title = flag.length ? [NSString stringWithFormat:@"%@ %@", flag, query] : [query copy];
-                }
-                NSMutableString *detail = [NSMutableString string];
-                if (query.length) [detail appendFormat:@"IP: %@\n", query];
-                if (city.length && country.length) {
-                    [detail appendFormat:@"%@, %@ (%@)", city, country, cc.uppercaseString];
-                } else if (country.length) {
-                    [detail appendFormat:@"%@ (%@)", country, cc.uppercaseString];
-                }
-                tip = detail.length ? [detail copy] : tip;
-            } else if ([dict isKindOfClass:[NSDictionary class]] && [dict[@"message"] isKindOfClass:[NSString class]]) {
-                tip = dict[@"message"];
-            }
-        }
+/// Reads `~/Library/Application Support/IPChanger/exit-identity.plist` written by the pref pane (Tor exit lookup).
+- (void)reloadFromSharedState
+{
+    NSString *path = IPCMBSharedExitIdentityPath();
+    NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:path];
 
-        // Fallback: IP only (no geo)
-        if ([title isEqualToString:@"—"] || !title.length) {
-            NSString *plain = IPCMBCurlDirect(@"https://checkip.amazonaws.com");
-            NSString *ip = [plain stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (ip.length) {
-                title = ip;
-                tip = [NSString stringWithFormat:@"IP: %@", ip];
-            }
-        }
+    NSString *ip = @"";
+    NSString *cc = @"";
+    NSString *country = @"";
+    NSString *city = @"";
+    BOOL ok = NO;
 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            __strong typeof(weakSelf) self2 = weakSelf;
-            if (!self2) return;
-            self2.statusItem.button.title = title;
-            self2.statusItem.button.toolTip = tip;
-        });
-    });
+    if ([plist isKindOfClass:[NSDictionary class]]) {
+        ok = [plist[@"ok"] boolValue];
+        id q = plist[@"query"];
+        ip = ([q isKindOfClass:[NSString class]]) ? (NSString *)q : @"";
+        id c = plist[@"countryCode"];
+        cc = ([c isKindOfClass:[NSString class]]) ? (NSString *)c : @"";
+        id co = plist[@"country"];
+        country = ([co isKindOfClass:[NSString class]]) ? (NSString *)co : @"";
+        id ci = plist[@"city"];
+        city = ([ci isKindOfClass:[NSString class]]) ? (NSString *)ci : @"";
+    }
+
+    NSString *flag = IPCMBFlagEmojiFromCountryCode(cc);
+    if (!flag.length) {
+        flag = @"🌐";
+    }
+
+    NSButton *barBtn = self.statusItem.button;
+    barBtn.image = IPCMBRasterizeFlagEmoji(flag);
+    barBtn.imagePosition = NSImageOnly;
+    barBtn.title = @"";
+
+    self.ipMenuItem.title = ip.length ? [NSString stringWithFormat:@"IP: %@", ip] : @"IP: —";
+
+    NSMutableString *detail = [NSMutableString string];
+    if (city.length && country.length) {
+        [detail appendFormat:@"%@, %@", city, country];
+    } else if (country.length) {
+        [detail appendString:country];
+    } else if (!ok && ip.length) {
+        [detail appendString:@"Geo unavailable (check Tor SOCKS in IP Changer)"];
+    }
+    if (detail.length) {
+        self.detailMenuItem.title = [detail copy];
+        self.detailMenuItem.hidden = NO;
+    } else {
+        self.detailMenuItem.title = @"";
+        self.detailMenuItem.hidden = YES;
+    }
+
+    NSMutableString *tip = [NSMutableString string];
+    if (ip.length) [tip appendFormat:@"IP: %@", ip];
+    if (ok && country.length) {
+        if (tip.length) [tip appendString:@"\n"];
+        [tip appendString:country];
+        if (city.length) [tip appendFormat:@" — %@", city];
+    } else if (ip.length && !ok) {
+        if (tip.length) [tip appendString:@"\n"];
+        [tip appendString:@"Open IP Changer for Tor exit details."];
+    }
+    if (!tip.length) {
+        [tip appendString:@"Open IP Changer in System Settings — exit identity appears after the pane refreshes."];
+    }
+    self.statusItem.button.toolTip = [tip copy];
 }
 
 - (void)openSystemSettingsForIPChanger
@@ -146,12 +206,10 @@ static NSString *IPCMBFlagEmojiFromCountryCode(NSString *cc)
         paneURL = [NSURL fileURLWithPath:sysPP isDirectory:YES];
     }
 
-    // Opening the .prefPane bundle is the most reliable way to focus the IP Changer pane.
     if (paneURL && [[NSWorkspace sharedWorkspace] openURL:paneURL]) {
         return;
     }
 
-    // Requires NSPrefPaneAllowsXAppleSystemPreferencesURLScheme in the pref pane Info.plist (set in this repo).
     NSURL *scheme = [NSURL URLWithString:@"x-apple.systempreferences:com.philodi.ipchanger"];
     if ([[NSWorkspace sharedWorkspace] openURL:scheme]) {
         return;
