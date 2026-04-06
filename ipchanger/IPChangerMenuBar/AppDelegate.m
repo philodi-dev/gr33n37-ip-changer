@@ -3,6 +3,7 @@
 //
 
 #import "AppDelegate.h"
+#import "IPCTorRotationEngine.h"
 #import <AppKit/AppKit.h>
 
 static NSString *IPCMBSharedExitIdentityPath(void)
@@ -104,6 +105,7 @@ static NSImage *IPCMBStatusFlagImageFromCountryCode(NSString *cc)
 @property (nonatomic, strong) NSTimer *pollTimer;
 @property (nonatomic, strong) NSMenuItem *ipMenuItem;
 @property (nonatomic, strong) NSMenuItem *detailMenuItem;
+@property (nonatomic, strong) NSMenuItem *stopRotationMenuItem;
 /// Avoid refetching flagcdn for the same country on every timer tick.
 @property (nonatomic, copy) NSString *resolvedFlagCountryCode;
 @property (nonatomic, strong) NSImage *resolvedFlagImage;
@@ -144,12 +146,19 @@ static NSImage *IPCMBStatusFlagImageFromCountryCode(NSString *cc)
 
     [menu addItem:[NSMenuItem separatorItem]];
 
+    self.stopRotationMenuItem = [menu addItemWithTitle:@"Stop rotation" action:@selector(stopRotationFromMenu:) keyEquivalent:@""];
+    self.stopRotationMenuItem.target = self;
+    self.stopRotationMenuItem.enabled = NO;
+
     m = [menu addItemWithTitle:@"Quit IP Changer Menu" action:@selector(quit) keyEquivalent:@"q"];
     m.target = self;
 
     self.statusItem.menu = menu;
 
-    [[NSDistributedNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadFromSharedState) name:@"com.philodi.ipchanger.ExitIdentityChanged" object:nil suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+    NSDistributedNotificationCenter *dnc = [NSDistributedNotificationCenter defaultCenter];
+    [dnc addObserver:self selector:@selector(reloadFromSharedState) name:@"com.philodi.ipchanger.ExitIdentityChanged" object:nil suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+    [dnc addObserver:self selector:@selector(ipc_handleRotationStart:) name:IPCRotationStartNotification object:nil suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+    [dnc addObserver:self selector:@selector(ipc_handleRotationStop:) name:IPCRotationStopNotification object:nil suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
 
     [self reloadFromSharedState];
     __weak typeof(self) wself = self;
@@ -161,7 +170,10 @@ static NSImage *IPCMBStatusFlagImageFromCountryCode(NSString *cc)
 
 - (void)dealloc
 {
-    [[NSDistributedNotificationCenter defaultCenter] removeObserver:self name:@"com.philodi.ipchanger.ExitIdentityChanged" object:nil];
+    NSDistributedNotificationCenter *dnc = [NSDistributedNotificationCenter defaultCenter];
+    [dnc removeObserver:self name:@"com.philodi.ipchanger.ExitIdentityChanged" object:nil];
+    [dnc removeObserver:self name:IPCRotationStartNotification object:nil];
+    [dnc removeObserver:self name:IPCRotationStopNotification object:nil];
 }
 
 - (void)menuWillOpen:(NSMenu *)menu
@@ -267,6 +279,32 @@ static NSImage *IPCMBStatusFlagImageFromCountryCode(NSString *cc)
         [tip appendString:@"Open IP Changer in System Settings — exit identity appears after the pane refreshes."];
     }
     self.statusItem.button.toolTip = [tip copy];
+
+    if (self.stopRotationMenuItem) {
+        self.stopRotationMenuItem.enabled = IPCRotationStateReadActive();
+    }
+}
+
+- (void)ipc_handleRotationStart:(NSNotification *)notification
+{
+    NSDictionary *info = notification.userInfo;
+    NSInteger interval = [info[@"interval"] integerValue];
+    NSInteger times = [info[@"times"] integerValue];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        [[IPCTorRotationEngine sharedEngine] runBackgroundRotationIntervalSeconds:interval times:times];
+    });
+}
+
+- (void)ipc_handleRotationStop:(NSNotification *)notification
+{
+    (void)notification;
+    [[IPCTorRotationEngine sharedEngine] requestStop];
+}
+
+- (void)stopRotationFromMenu:(id)sender
+{
+    (void)sender;
+    [[NSDistributedNotificationCenter defaultCenter] postNotificationName:IPCRotationStopNotification object:nil userInfo:nil deliverImmediately:YES];
 }
 
 - (void)openSystemSettingsForIPChanger
