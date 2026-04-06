@@ -151,6 +151,27 @@ You should see a Tor exit IP, not your home or relay IP.
 
 ---
 
+## Privacy: ISPs, trackers, and real IP
+
+This project helps you **rotate Tor exit IPs** and see **exit** geo data; it is **not** a guarantee of anonymity.
+
+**Websites and ad trackers**  
+When a browser or app sends traffic **only** through Tor SOCKS (`127.0.0.1:9050`, with DNS handled correctly for that stack), those services normally see the **Tor exit relay’s IP** and geo for **that** IP—not your home IP. Changing exits changes that visible IP.
+
+**Your ISP (or network operator)**  
+They can typically tell that you are **using Tor** (connections to Tor relays). They do not see your HTTPS page contents the way a normal proxy might. They still see you as a subscriber and may see **volume and timing** metadata.
+
+**Things that can still identify or link you**
+
+- **Signing in** (Google, Apple, email, etc.) ties activity to **you**, regardless of exit IP.
+- **Browser fingerprinting** (canvas, fonts, WebGL, behaviour) can track or correlate without a stable IP.
+- **Leaks:** traffic that bypasses Tor (**WebRTC**, **IPv6**, wrong app, misconfigured proxy) can expose your **real** IP or location.
+- **Apps** that do not use the SOCKS proxy are **not** protected.
+
+For **strong browser-focused anonymity**, [Tor Browser](https://www.torproject.org/download/) is purpose-built; SOCKS + a normal browser is easier to misconfigure than Tor Browser.
+
+---
+
 ## Security notes
 
 - Do not commit **certificates**, **`.p12`**, **`.mobileprovision`**, **AuthKey `*.p8`**, or **`.env`** secrets; this repo’s **`.gitignore`** tries to exclude common Apple signing and key patterns.
@@ -162,4 +183,4 @@ You should see a Tor exit IP, not your home or relay IP.
 
 Project structure and behaviour may evolve; see git history for authors. Third-party services (**ip-api**, **flagcdn**) have their own terms and rate limits; use is subject to those services’ policies.
 
-If you follow the proxy and Tor steps above, the address sites see should match a **Tor exit**, not your normal ISP or relay IP.
+If you route application traffic correctly through Tor and avoid leaks, the address **those applications** show to sites should be a **Tor exit**, not your normal ISP IP—subject to the limits in **Privacy: ISPs, trackers, and real IP** above.
