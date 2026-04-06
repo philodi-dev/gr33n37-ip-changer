@@ -10,7 +10,7 @@ Rotate your public IP using **Tor**: a cross‑platform **Bash** script and a **
 |-----------|----------|-------------|
 | [`ip-changer.sh`](ip-changer.sh) | Linux & macOS | Interactive script: start Tor, restart/reload for new exits, optional intervals and repeat counts. |
 | [`ipchanger/`](ipchanger/) | macOS only | Xcode project builds `ipchanger.prefPane` — **IP Changer** in System Settings: rotation controls, live exit identity, flags, ISP/region/city/country, Tor path (guard → middle → exit). |
-| **`IPChangerMenuBar`** (same Xcode project) | macOS only | Optional **menu bar extra** (`NSStatusItem`): short **country code · city** (or IP) via Tor SOCKS; no Dock icon (`LSUIElement`). The **preference pane cannot** add a persistent bar item by itself. |
+| **`IPChangerMenuBar`** (same Xcode project) | macOS only | Optional **menu bar extra** (`NSStatusItem`): **country flag** (same PNG source as the pane: [flagcdn.com](https://flagcdn.com)), **IP and location in the menu**; mirrors the pane’s Tor exit identity via a shared plist. No Dock icon (`LSUIElement`). The **preference pane cannot** add a persistent bar item by itself. |
 
 ---
 
@@ -75,7 +75,7 @@ chmod +x ipchanger/install_prefpane.sh
 ./ipchanger/install_prefpane.sh
 ```
 
-- Do **not** run the installer as **root**; signing uses your login keychain. The pane is installed to **`~/Library/PreferencePanes/`**, and **`install_prefpane.sh`** also builds and copies **`IPChangerMenuBar.app`** to **`~/Applications/`** (menu bar helper).
+- Do **not** run the installer as **root**; signing uses your login keychain. The pane is installed to **`~/Library/PreferencePanes/`**. **`install_prefpane.sh`** also builds **`IPChangerMenuBar.app`** and copies it to **`/Applications/`** when possible (otherwise **`~/Applications/`** — Finder’s top-level **Applications** folder vs **Home → Applications**).
 - Or open **`ipchanger.xcodeproj`** in Xcode, select the **ipchanger** scheme, **Product → Build** (⌘B). If your scheme has a post-build copy action, it may install the signed pane automatically.
 - After installing, **quit System Settings fully** (⌘Q), reopen, and search for **IP Changer** or **ipchanger**.
 
@@ -102,10 +102,15 @@ System Settings plug-ins do not run in the background, so a **separate tiny app*
 
 1. Open **`ipchanger/ipchanger.xcodeproj`** in Xcode.
 2. Select the **`IPChangerMenuBar`** scheme.
-3. **Product → Run** (⌘R). The icon appears in the menu bar; **Quit** from its menu stops it.
-4. To **keep it across logins:** add the built app to **System Settings → General → Login Items & Extensions → Open at Login** (or drag `IPChangerMenuBar.app` from the **Products** folder in Xcode’s Report navigator after a build).
+3. **Product → Run** (⌘R). The flag appears in the menu bar; **Quit** from its menu stops it.
+4. To **keep it across logins:** add the built app to **System Settings → General → Login Items** (or drag `IPChangerMenuBar.app` from the **Products** folder in Xcode’s Report navigator after a build).
 
-The bar updates about every **30 seconds** (and when you choose **Refresh now**). It uses **`127.0.0.1:9050`** like the rest of this project — start Tor first.
+**Behaviour**
+
+- **Exit identity** matches the preference pane: the pane writes **`~/Library/Application Support/IPChanger/exit-identity.plist`** whenever it updates geo over Tor SOCKS; the menu bar reads that file and refreshes on a short timer plus a distributed notification when the pane updates.
+- **Status item:** **flag image only** (PNG from flagcdn, same URL pattern as the pane; emoji raster fallback if the download fails). **IP, city, and country** appear in the **menu** when you click the icon (not in the title).
+- **Open IP Changer Settings…** opens the **IP Changer** preference pane in System Settings (`.prefPane` bundle or `x-apple.systempreferences:` URL; the pane’s `Info.plist` enables the URL scheme).
+- The menu bar does **not** run its own Tor SOCKS lookups for display; open **IP Changer** at least once so the shared plist is populated (Tor running, SOCKS up, as for the pane).
 
 ---
 

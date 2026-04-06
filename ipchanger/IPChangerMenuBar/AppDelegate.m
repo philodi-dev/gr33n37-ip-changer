@@ -1,5 +1,5 @@
 //
-//  AppDelegate.m — menu bar: flag only (Tor exit country from pref pane); IP in menu when opened.
+//  AppDelegate.m — menu bar: flag PNG from flagcdn (same as pref pane), then emoji raster fallback.
 //
 
 #import "AppDelegate.h"
@@ -11,7 +11,7 @@ static NSString *IPCMBSharedExitIdentityPath(void)
     return [dir stringByAppendingPathComponent:@"exit-identity.plist"];
 }
 
-/// ISO 3166-1 alpha-2 → regional-indicator flag emoji (empty if invalid).
+/// ISO 3166-1 alpha-2 → regional-indicator flag string (empty if invalid).
 static NSString *IPCMBFlagEmojiFromCountryCode(NSString *cc)
 {
     if (cc.length != 2) return @"";
@@ -23,14 +23,34 @@ static NSString *IPCMBFlagEmojiFromCountryCode(NSString *cc)
     return [NSString stringWithCharacters:(unichar[]){ r0, r1 } length:2];
 }
 
-/// NSStatusItem titles often render regional-indicator flags as blank; rasterize like the pref pane does.
-static NSImage *IPCMBRasterizeFlagEmoji(NSString *emoji)
+/// Same URL as ipchanger.m `curlSOCKSData:…flagcdn.com…`.
+static NSData *IPCMBFetchFlagPNGData(NSString *cc)
+{
+    if (cc.length != 2) return nil;
+    NSString *url = [NSString stringWithFormat:@"https://flagcdn.com/w80/%@.png", cc.lowercaseString];
+    NSArray *args = @[ @"-s", @"--connect-timeout", @"6", @"-m", @"12", url ];
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/curl"];
+    task.arguments = args;
+    task.standardError = [NSFileHandle fileHandleForWritingAtPath:@"/dev/null"];
+    NSPipe *out = [NSPipe pipe];
+    task.standardOutput = out;
+    @try {
+        [task launch];
+    } @catch (__unused NSException *ex) {
+        return nil;
+    }
+    [task waitUntilExit];
+    return [[out fileHandleForReading] readDataToEndOfFile];
+}
+
+/// Mirrors `ipchanger` `ipc_imageFromFlagEmoji:` (34pt Apple Color Emoji, flipped:NO), then scales for the status item.
+static NSImage *IPCMBImageFromFlagEmojiLikePrefPane(NSString *emoji)
 {
     NSString *s = emoji.length ? emoji : @"🌐";
-    CGFloat fontSize = 17.0;
-    NSFont *font = [NSFont fontWithName:@"Apple Color Emoji" size:fontSize];
+    NSFont *font = [NSFont fontWithName:@"Apple Color Emoji" size:34.0];
     if (!font) {
-        font = [NSFont systemFontOfSize:fontSize];
+        font = [NSFont systemFontOfSize:34.0];
     }
     NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
     para.alignment = NSTextAlignmentCenter;
@@ -41,9 +61,9 @@ static NSImage *IPCMBRasterizeFlagEmoji(NSString *emoji)
     NSStringDrawingOptions drawOpts = NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesDeviceMetrics;
     NSSize maxHint = NSMakeSize(120.0, 90.0);
     NSRect br = [s boundingRectWithSize:maxHint options:drawOpts attributes:attrs];
-    CGFloat tw = MAX(18.0, ceil(NSWidth(br)));
-    CGFloat th = MAX(16.0, ceil(NSHeight(br)));
-    NSSize sz = NSMakeSize(tw + 10.0, th + 8.0);
+    CGFloat tw = MAX(32.0, ceil(NSWidth(br)));
+    CGFloat th = MAX(28.0, ceil(NSHeight(br)));
+    NSSize sz = NSMakeSize(tw + 12.0, th + 12.0);
 
     NSImage *image = [NSImage imageWithSize:sz flipped:NO drawingHandler:^BOOL(NSRect rect) {
         [[NSGraphicsContext currentContext] setImageInterpolation:NSImageInterpolationHigh];
@@ -56,9 +76,27 @@ static NSImage *IPCMBRasterizeFlagEmoji(NSString *emoji)
         return YES;
     }];
     image.template = NO;
-    // Status bar layout expects a modest logical size.
     [image setSize:NSMakeSize(22.0, 18.0)];
     return image;
+}
+
+/// Same logic as `ipc_setFlagImageFromPNGData:countryCode:` — PNG first, then emoji raster.
+static NSImage *IPCMBStatusFlagImageFromCountryCode(NSString *cc)
+{
+    NSData *png = IPCMBFetchFlagPNGData(cc);
+    if (png.length > 24) {
+        NSImage *img = [[NSImage alloc] initWithData:png];
+        if (img && img.size.width > 4.0 && img.size.height > 2.0) {
+            img.template = NO;
+            [img setSize:NSMakeSize(22.0, 18.0)];
+            return img;
+        }
+    }
+    NSString *emoji = IPCMBFlagEmojiFromCountryCode(cc);
+    if (!emoji.length) {
+        emoji = @"🌐";
+    }
+    return IPCMBImageFromFlagEmojiLikePrefPane(emoji);
 }
 
 @interface AppDelegate () <NSMenuDelegate>
@@ -66,6 +104,11 @@ static NSImage *IPCMBRasterizeFlagEmoji(NSString *emoji)
 @property (nonatomic, strong) NSTimer *pollTimer;
 @property (nonatomic, strong) NSMenuItem *ipMenuItem;
 @property (nonatomic, strong) NSMenuItem *detailMenuItem;
+/// Avoid refetching flagcdn for the same country on every timer tick.
+@property (nonatomic, copy) NSString *resolvedFlagCountryCode;
+@property (nonatomic, strong) NSImage *resolvedFlagImage;
+@property (nonatomic, copy) NSString *flagFetchPendingCC;
+@property (nonatomic, assign) NSInteger flagFetchGeneration;
 @end
 
 @implementation AppDelegate
@@ -74,7 +117,7 @@ static NSImage *IPCMBRasterizeFlagEmoji(NSString *emoji)
 {
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     NSButton *btn = self.statusItem.button;
-    btn.image = IPCMBRasterizeFlagEmoji(@"🌐");
+    btn.image = IPCMBImageFromFlagEmojiLikePrefPane(@"🌐");
     btn.imagePosition = NSImageOnly;
     btn.title = @"";
 
@@ -126,7 +169,7 @@ static NSImage *IPCMBRasterizeFlagEmoji(NSString *emoji)
     [self reloadFromSharedState];
 }
 
-/// Reads `~/Library/Application Support/IPChanger/exit-identity.plist` written by the pref pane (Tor exit lookup).
+/// Reads shared plist; flag matches pref pane: flagcdn PNG, else same emoji raster as `ipc_imageFromFlagEmoji:`.
 - (void)reloadFromSharedState
 {
     NSString *path = IPCMBSharedExitIdentityPath();
@@ -150,15 +193,47 @@ static NSImage *IPCMBRasterizeFlagEmoji(NSString *emoji)
         city = ([ci isKindOfClass:[NSString class]]) ? (NSString *)ci : @"";
     }
 
-    NSString *flag = IPCMBFlagEmojiFromCountryCode(cc);
-    if (!flag.length) {
-        flag = @"🌐";
-    }
-
     NSButton *barBtn = self.statusItem.button;
-    barBtn.image = IPCMBRasterizeFlagEmoji(flag);
     barBtn.imagePosition = NSImageOnly;
     barBtn.title = @"";
+
+    NSString *ccNorm = (cc.length == 2) ? cc.uppercaseString : @"";
+    if (ok && ccNorm.length == 2) {
+        if ([self.resolvedFlagCountryCode isEqualToString:ccNorm] && self.resolvedFlagImage) {
+            barBtn.image = self.resolvedFlagImage;
+        } else if ([self.flagFetchPendingCC isEqualToString:ccNorm]) {
+            // PNG fetch in flight for this country; keep interim image.
+        } else {
+            NSString *ccUpper = ccNorm;
+            self.flagFetchPendingCC = ccUpper;
+            NSInteger gen = ++self.flagFetchGeneration;
+            NSString *emojiNow = IPCMBFlagEmojiFromCountryCode(ccUpper);
+            if (!emojiNow.length) {
+                emojiNow = @"🌐";
+            }
+            barBtn.image = IPCMBImageFromFlagEmojiLikePrefPane(emojiNow);
+
+            __weak typeof(self) wself = self;
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                NSImage *img = IPCMBStatusFlagImageFromCountryCode(ccUpper);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    __strong typeof(wself) s = wself;
+                    if (!s) return;
+                    if (gen != s.flagFetchGeneration) return;
+                    s.resolvedFlagCountryCode = ccUpper;
+                    s.resolvedFlagImage = img;
+                    s.flagFetchPendingCC = nil;
+                    s.statusItem.button.image = img;
+                });
+            });
+        }
+    } else {
+        self.resolvedFlagCountryCode = nil;
+        self.resolvedFlagImage = nil;
+        self.flagFetchPendingCC = nil;
+        self.flagFetchGeneration += 1;
+        barBtn.image = IPCMBImageFromFlagEmojiLikePrefPane(@"🌐");
+    }
 
     self.ipMenuItem.title = ip.length ? [NSString stringWithFormat:@"IP: %@", ip] : @"IP: —";
 
